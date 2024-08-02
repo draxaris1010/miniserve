@@ -6,8 +6,8 @@ use fixtures::{
     port, server, server_no_stderr, tmpdir, Error, TestServer, DIRECTORIES, FILES,
     HIDDEN_DIRECTORIES, HIDDEN_FILES,
 };
-use http::StatusCode;
 use regex::Regex;
+use reqwest::StatusCode;
 use rstest::rstest;
 use select::{document::Document, node::Node, predicate::Attr};
 use std::process::{Command, Stdio};
@@ -33,6 +33,9 @@ fn serves_requests_with_no_options(tmpdir: TempDir) -> Result<(), Error> {
     for &file in FILES {
         assert!(parsed.find(|x: &Node| x.text() == file).next().is_some());
     }
+    for &dir in DIRECTORIES {
+        assert!(parsed.find(|x: &Node| x.text() == dir).next().is_some());
+    }
 
     child.kill()?;
 
@@ -48,7 +51,7 @@ fn serves_requests_with_non_default_port(server: TestServer) -> Result<(), Error
         let f = parsed.find(|x: &Node| x.text() == file).next().unwrap();
         reqwest::blocking::get(server.url().join(f.attr("href").unwrap())?)?.error_for_status()?;
         assert_eq!(
-            format!("/{}", file),
+            format!("/{file}"),
             percent_encoding::percent_decode_str(f.attr("href").unwrap()).decode_utf8_lossy(),
         );
     }
@@ -58,8 +61,7 @@ fn serves_requests_with_non_default_port(server: TestServer) -> Result<(), Error
             .find(|x: &Node| x.text() == directory)
             .next()
             .is_some());
-        let dir_body =
-            reqwest::blocking::get(server.url().join(&directory)?)?.error_for_status()?;
+        let dir_body = reqwest::blocking::get(server.url().join(directory)?)?.error_for_status()?;
         let dir_body_parsed = Document::from_read(dir_body)?;
         for &file in FILES {
             assert!(dir_body_parsed
@@ -77,23 +79,22 @@ fn serves_requests_hidden_files(#[with(&["--hidden"])] server: TestServer) -> Re
     let body = reqwest::blocking::get(server.url())?.error_for_status()?;
     let parsed = Document::from_read(body)?;
 
-    for &file in FILES.into_iter().chain(HIDDEN_FILES) {
+    for &file in FILES.iter().chain(HIDDEN_FILES) {
         let f = parsed.find(|x: &Node| x.text() == file).next().unwrap();
         assert_eq!(
-            format!("/{}", file),
+            format!("/{file}"),
             percent_encoding::percent_decode_str(f.attr("href").unwrap()).decode_utf8_lossy(),
         );
     }
 
-    for &directory in DIRECTORIES.into_iter().chain(HIDDEN_DIRECTORIES) {
+    for &directory in DIRECTORIES.iter().chain(HIDDEN_DIRECTORIES) {
         assert!(parsed
             .find(|x: &Node| x.text() == directory)
             .next()
             .is_some());
-        let dir_body =
-            reqwest::blocking::get(server.url().join(&directory)?)?.error_for_status()?;
+        let dir_body = reqwest::blocking::get(server.url().join(directory)?)?.error_for_status()?;
         let dir_body_parsed = Document::from_read(dir_body)?;
-        for &file in FILES.into_iter().chain(HIDDEN_FILES) {
+        for &file in FILES.iter().chain(HIDDEN_FILES) {
             assert!(dir_body_parsed
                 .find(|x: &Node| x.text() == file)
                 .next()
@@ -109,12 +110,12 @@ fn serves_requests_no_hidden_files_without_flag(server: TestServer) -> Result<()
     let body = reqwest::blocking::get(server.url())?.error_for_status()?;
     let parsed = Document::from_read(body)?;
 
-    for &hidden_item in HIDDEN_FILES.into_iter().chain(HIDDEN_DIRECTORIES) {
+    for &hidden_item in HIDDEN_FILES.iter().chain(HIDDEN_DIRECTORIES) {
         assert!(parsed
             .find(|x: &Node| x.text() == hidden_item)
             .next()
             .is_none());
-        let resp = reqwest::blocking::get(server.url().join(&hidden_item)?)?;
+        let resp = reqwest::blocking::get(server.url().join(hidden_item)?)?;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -135,9 +136,9 @@ fn serves_requests_symlinks(
     let broken = "symlink broken";
 
     // Set up some basic symlinks:
-    // to dir, to file, to non-existant location
-    let orig = DIRECTORIES[0].strip_suffix("/").unwrap();
-    let link = server.path().join(dir.strip_suffix("/").unwrap());
+    // to dir, to file, to non-existent location
+    let orig = DIRECTORIES[0].strip_suffix('/').unwrap();
+    let link = server.path().join(dir.strip_suffix('/').unwrap());
     symlink_dir(orig, link).expect("Couldn't create symlink");
     symlink_file(FILES[0], server.path().join(file)).expect("Couldn't create symlink");
     symlink_file("should-not-exist.xxx", server.path().join(broken))
@@ -147,7 +148,7 @@ fn serves_requests_symlinks(
     let parsed = Document::from_read(body)?;
 
     for &entry in &[file, dir] {
-        let status = reqwest::blocking::get(server.url().join(&entry)?)?.status();
+        let status = reqwest::blocking::get(server.url().join(entry)?)?.status();
         // We expect a 404 here for when `no_symlinks` is `true`.
         if no_symlinks {
             assert_eq!(status, StatusCode::NOT_FOUND);
@@ -166,14 +167,14 @@ fn serves_requests_symlinks(
         }
 
         // If following symlinks is deactivated, we can just skip this iteration as we assorted
-        // above tht no entries in the listing can be found for symlinks in that case.
+        // above the no entries in the listing can be found for symlinks in that case.
         if no_symlinks {
             continue;
         }
 
         let node = node.unwrap();
-        assert_eq!(node.attr("href").unwrap().strip_prefix("/").unwrap(), entry);
-        if entry.ends_with("/") {
+        assert_eq!(node.attr("href").unwrap().strip_prefix('/').unwrap(), entry);
+        if entry.ends_with('/') {
             let node = parsed
                 .find(|x: &Node| x.name().unwrap_or_default() == "a" && x.text() == DIRECTORIES[0])
                 .next();
@@ -195,7 +196,7 @@ fn serves_requests_with_randomly_assigned_port(tmpdir: TempDir) -> Result<(), Er
     let mut child = Command::cargo_bin("miniserve")?
         .arg(tmpdir.path())
         .arg("-p")
-        .arg("0".to_string())
+        .arg("0")
         .stdout(Stdio::piped())
         .spawn()?;
 
@@ -267,6 +268,24 @@ fn serve_index_instead_of_404_in_spa_mode(
 }
 
 #[rstest]
+#[case(server_no_stderr(&["--pretty-urls", "--index", FILES[1]]), "/")]
+#[case(server_no_stderr(&["--pretty-urls", "--index", FILES[1]]), "test.html")]
+#[case(server_no_stderr(&["--pretty-urls", "--index", FILES[1]]), "test")]
+fn serve_file_instead_of_404_in_pretty_urls_mode(
+    #[case] server: TestServer,
+    #[case] url: &str,
+) -> Result<(), Error> {
+    let body = reqwest::blocking::get(format!("{}{}", server.url(), url))?.error_for_status()?;
+    let parsed = Document::from_read(body)?;
+    assert!(parsed
+        .find(|x: &Node| x.text() == "Test Hello Yes")
+        .next()
+        .is_some());
+
+    Ok(())
+}
+
+#[rstest]
 #[case(server(&["--route-prefix", "foobar"]))]
 #[case(server(&["--route-prefix", "/foobar/"]))]
 fn serves_requests_with_route_prefix(#[case] server: TestServer) -> Result<(), Error> {
@@ -299,6 +318,41 @@ fn serves_requests_static_file_check(
     assert!(parsed
         .find(Attr("rel", "icon"))
         .all(|x| re.is_match(x.attr("href").unwrap())));
+
+    Ok(())
+}
+
+#[rstest]
+#[case(server(&["--disable-indexing"]))]
+fn serves_no_directory_if_indexing_disabled(#[case] server: TestServer) -> Result<(), Error> {
+    let body = reqwest::blocking::get(server.url())?;
+    assert_eq!(body.status(), StatusCode::NOT_FOUND);
+    let parsed = Document::from_read(body)?;
+
+    assert!(parsed
+        .find(|x: &Node| x.text() == FILES[0])
+        .next()
+        .is_none());
+    assert!(parsed
+        .find(|x: &Node| x.text() == DIRECTORIES[0])
+        .next()
+        .is_none());
+    assert!(parsed
+        .find(|x: &Node| x.text() == "404 Not Found")
+        .next()
+        .is_some());
+    assert!(parsed
+        .find(|x: &Node| x.text() == "File not found.")
+        .next()
+        .is_some());
+
+    Ok(())
+}
+
+#[rstest]
+#[case(server(&["--disable-indexing"]))]
+fn serves_file_requests_when_indexing_disabled(#[case] server: TestServer) -> Result<(), Error> {
+    reqwest::blocking::get(format!("{}{}", server.url(), FILES[0]))?.error_for_status()?;
 
     Ok(())
 }

@@ -1,9 +1,8 @@
-use actix_web::dev::ServiceRequest;
-use actix_web::HttpMessage;
+use actix_web::{dev::ServiceRequest, HttpMessage};
 use actix_web_httpauth::extractors::basic::BasicAuth;
 use sha2::{Digest, Sha256, Sha512};
 
-use crate::errors::ContextualError;
+use crate::errors::RuntimeError;
 
 #[derive(Clone, Debug)]
 /// HTTP Basic authentication parameters
@@ -87,7 +86,7 @@ pub async fn handle_auth(
     if match_auth(&cred.into(), required_auth) {
         Ok(req)
     } else {
-        Err((ContextualError::InvalidHttpCredentials.into(), req))
+        Err((RuntimeError::InvalidHttpCredentials.into(), req))
     }
 }
 
@@ -115,7 +114,7 @@ mod tests {
     fn test_get_hash(password: &str, hash_method: &str, hash: &str) {
         let hash_func = get_hash_func(hash_method);
         let expected = hex::decode(hash).expect("Provided hash is not a valid hex code");
-        let received = hash_func(&password.to_owned());
+        let received = hash_func(password);
         assert_eq!(received, expected);
     }
 
@@ -125,8 +124,8 @@ mod tests {
 
         let password = match encrypt {
             "plain" => Plain(password.to_owned()),
-            "sha256" => Sha256(get_hash::<sha2::Sha256>(&password.to_owned())),
-            "sha512" => Sha512(get_hash::<sha2::Sha512>(&password.to_owned())),
+            "sha256" => Sha256(get_hash::<sha2::Sha256>(password)),
+            "sha512" => Sha512(get_hash::<sha2::Sha512>(password)),
             _ => panic!("Unknown encryption type"),
         };
 

@@ -8,8 +8,59 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 <!-- next-header -->
 
 ## [Unreleased] - ReleaseDate
+- Fix wrapping text in mobile view when the file name too long [#1379](https://github.com/svenstaro/miniserve/pull/1379) (thanks @chaibiq)
+- Fix missing drag-form when dragging file in to browser [#1390](https://github.com/svenstaro/miniserve/pull/1390) (thanks @chaibiq)
+- Improve documentation for the --header parameter [#1389](https://github.com/svenstaro/miniserve/pull/1389) (thanks @orwithout)
+
+## [0.27.1] - 2024-03-16
+- Add `Add file and folder symbols` [#1365](https://github.com/svenstaro/miniserve/pull/1365) (thanks @chaibiq)
+
+## [0.27.0] - 2024-03-16
+- Add `-C/--compress-response` to enable response compression [1315](https://github.com/svenstaro/miniserve/pull/1315) (thanks @zuisong)
+- Refactor errors [#1331](https://github.com/svenstaro/miniserve/pull/1331) (thanks @cyqsimon)
+- Add `-I/--disable-inexing` [#1329](https://github.com/svenstaro/miniserve/pull/1329) (thanks @dyc3)
+
+## [0.26.0] - 2024-01-13
+- Properly handle read-only errors on Windows [#1310](https://github.com/svenstaro/miniserve/pull/1310) (thanks @ViRb3)
+- Use `tokio::fs` instead of `std::fs` to enable async file operations [#445](https://github.com/svenstaro/miniserve/issues/445)
+- Add `-S`/`--default-sorting-method` and `-O`/`--default-sorting-order` flags [#1308](https://github.com/svenstaro/miniserve/pull/1308) (thanks @ElliottLandsborough)
+
+## [0.25.0] - 2024-01-07
+- Add `--pretty-urls` [#1193](https://github.com/svenstaro/miniserve/pull/1193) (thanks @nlopes)
+- Fix single quote display with `--show-wget-footer` [#1191](https://github.com/svenstaro/miniserve/pull/1191) (thanks @d-air1)
+- Remove header Content-Encoding when archiving [#1290](https://github.com/svenstaro/miniserve/pull/1290) (thanks @5long)
+- Prevent illegal request path from crashing program [#1285](https://github.com/svenstaro/miniserve/pull/1285) (thanks @cyqsimon)
+- Fixed issue where serving files with a newline would fail [#1294](https://github.com/svenstaro/miniserve/issues/1294)
+
+## [0.24.0] - 2023-07-06
+- Fix ANSI color codes are printed when not a tty [#1095](https://github.com/svenstaro/miniserve/pull/1095)
+- Allow parameters to be provided via environment variables [#1160](https://github.com/svenstaro/miniserve/pull/1160)
+
+## [0.23.2] - 2023-04-28
+- Build Windows build with static CRT [#1107](https://github.com/svenstaro/miniserve/pull/1107)
+
+## [0.23.1] - 2023-04-17
+- Add EC key support [#1080](https://github.com/svenstaro/miniserve/issues/1080)
+
+## [0.23.0] - 2023-03-01
+- Update to clap v4
+- Show localized datetime [#949](https://github.com/svenstaro/miniserve/pull/949) (thanks @IvkinStanislav)
+- Fix sorting breaks subdir downloading [#991](https://github.com/svenstaro/miniserve/pull/991) (thanks @Vam-Jam)
+- Fix wget footer [#1043](https://github.com/svenstaro/miniserve/pull/1043) (thanks @Yusuto)
+
+## [0.22.0] - 2022-09-20
+- Faster QR code generation [#848](https://github.com/svenstaro/miniserve/pull/848) (thanks @cyqsimon)
+- Make `--readme` support not only `README.md` but also `README` and `README.txt` rendered as
+  plaintext [#911](https://github.com/svenstaro/miniserve/pull/911) (thanks @Atreyagaurav)
+- Change `-u/--upload-files` slightly in the sense that it can now either be provided by itself as
+  before or receive a file path to restrict uploading to only that path. Can be provided multiple
+  times for multiple allowed paths [#858](https://github.com/svenstaro/miniserve/pull/858) (thanks
+  @jonasdiemer)
+
+## [0.21.0] - 2022-09-15
 - Fix bug where static files would be served incorrectly when using `--random-route` [#835](https://github.com/svenstaro/miniserve/pull/835) (thanks @solarknight)
 - Add `--readme` to render the README in the current directory after the file listing [#860](https://github.com/svenstaro/miniserve/pull/860) (thanks @Atreyagaurav)
+- Add more architectures (and also additional container images)
 
 ## [0.20.0] - 2022-06-26
 - Fixed security issue where it was possible to upload files to locations pointed to by symlinks
@@ -150,7 +201,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 - Some theme related bug fixes (thanks @boastful-squirrel)
 
 <!-- next-url -->
-[Unreleased]: https://github.com/svenstaro/miniserve/compare/v0.20.0...HEAD
+[Unreleased]: https://github.com/svenstaro/miniserve/compare/v0.27.1...HEAD
+[0.27.1]: https://github.com/svenstaro/miniserve/compare/v0.27.0...v0.27.1
+[0.27.0]: https://github.com/svenstaro/miniserve/compare/v0.26.0...v0.27.0
+[0.26.0]: https://github.com/svenstaro/miniserve/compare/v0.25.0...v0.26.0
+[0.25.0]: https://github.com/svenstaro/miniserve/compare/v0.24.0...v0.25.0
+[0.24.0]: https://github.com/svenstaro/miniserve/compare/v0.23.2...v0.24.0
+[0.23.2]: https://github.com/svenstaro/miniserve/compare/v0.23.1...v0.23.2
+[0.23.1]: https://github.com/svenstaro/miniserve/compare/v0.23.0...v0.23.1
+[0.23.0]: https://github.com/svenstaro/miniserve/compare/v0.22.0...v0.23.0
+[0.22.0]: https://github.com/svenstaro/miniserve/compare/v0.21.0...v0.22.0
+[0.21.0]: https://github.com/svenstaro/miniserve/compare/v0.20.0...v0.21.0
 [0.20.0]: https://github.com/svenstaro/miniserve/compare/v0.19.5...v0.20.0
 [0.19.5]: https://github.com/svenstaro/miniserve/compare/v0.19.4...v0.19.5
 [0.19.4]: https://github.com/svenstaro/miniserve/compare/v0.19.3...v0.19.4

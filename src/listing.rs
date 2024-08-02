@@ -1,21 +1,22 @@
 #![allow(clippy::format_push_string)]
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::time::SystemTime;
 
-use actix_web::dev::ServiceResponse;
-use actix_web::web::Query;
-use actix_web::{HttpMessage, HttpRequest, HttpResponse};
+use actix_web::{
+    dev::ServiceResponse, http::Uri, web::Query, HttpMessage, HttpRequest, HttpResponse,
+};
 use bytesize::ByteSize;
+use clap::ValueEnum;
 use comrak::{markdown_to_html, ComrakOptions};
 use percent_encoding::{percent_decode_str, utf8_percent_encode};
-use qrcodegen::{QrCode, QrCodeEcc};
+use regex::Regex;
 use serde::Deserialize;
-use strum_macros::{Display, EnumString};
+use strum::{Display, EnumString};
 
 use crate::archive::ArchiveMethod;
 use crate::auth::CurrentUser;
-use crate::errors::{self, ContextualError};
+use crate::errors::{self, RuntimeError};
 use crate::renderer;
 
 use self::percent_encode_sets::PATH_SEGMENT;
@@ -30,23 +31,21 @@ mod percent_encode_sets {
     pub const PATH_SEGMENT: &AsciiSet = &PATH.add(b'/').add(b'\\');
 }
 
-/// Query parameters
+/// Query parameters used by listing APIs
 #[derive(Deserialize, Default)]
-pub struct QueryParameters {
-    pub path: Option<PathBuf>,
+pub struct ListingQueryParameters {
     pub sort: Option<SortingMethod>,
     pub order: Option<SortingOrder>,
     pub raw: Option<bool>,
-    pub mkdir_name: Option<String>,
-    qrcode: Option<String>,
     download: Option<ArchiveMethod>,
 }
 
 /// Available sorting methods
-#[derive(Deserialize, Clone, EnumString, Display, Copy)]
+#[derive(Deserialize, Default, Clone, EnumString, Display, Copy, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum SortingMethod {
+    #[default]
     /// Sort by name
     Name,
 
@@ -58,17 +57,18 @@ pub enum SortingMethod {
 }
 
 /// Available sorting orders
-#[derive(Deserialize, Clone, EnumString, Display, Copy)]
+#[derive(Deserialize, Default, Clone, EnumString, Display, Copy, ValueEnum)]
 pub enum SortingOrder {
     /// Ascending order
     #[serde(alias = "asc")]
     #[strum(serialize = "asc")]
-    Ascending,
+    Asc,
 
     /// Descending order
+    #[default]
     #[serde(alias = "desc")]
     #[strum(serialize = "desc")]
-    Descending,
+    Desc,
 }
 
 #[derive(PartialEq, Eq)]
@@ -121,12 +121,12 @@ impl Entry {
         }
     }
 
-    /// Returns wether the entry is a directory
+    /// Returns whether the entry is a directory
     pub fn is_dir(&self) -> bool {
         self.entry_type == EntryType::Directory
     }
 
-    /// Returns wether the entry is a file
+    /// Returns whether the entry is a file
     pub fn is_file(&self) -> bool {
         self.entry_type == EntryType::File
     }
@@ -162,10 +162,29 @@ pub fn directory_listing(
     let current_user: Option<&CurrentUser> = extensions.get::<CurrentUser>();
 
     let conf = req.app_data::<crate::MiniserveConfig>().unwrap();
+    if conf.disable_indexing {
+        return Ok(ServiceResponse::new(
+            req.clone(),
+            HttpResponse::NotFound()
+                .content_type(mime::TEXT_PLAIN_UTF_8)
+                .body("File not found."),
+        ));
+    }
     let serve_path = req.path();
 
     let base = Path::new(serve_path);
     let random_route_abs = format!("/{}", conf.route_prefix);
+    let abs_uri = {
+        let res = Uri::builder()
+            .scheme(req.connection_info().scheme())
+            .authority(req.connection_info().host())
+            .path_and_query(req.uri().to_string())
+            .build();
+        match res {
+            Ok(uri) => uri,
+            Err(err) => return Ok(ServiceResponse::from_err(err, req.clone())),
+        }
+    };
     let is_root = base.parent().is_none() || Path::new(&req.path()) == Path::new(&random_route_abs);
 
     let encoded_dir = match base.strip_prefix(random_route_abs) {
@@ -184,9 +203,7 @@ pub fn directory_listing(
         let decoded = percent_decode_str(&encoded_dir).decode_utf8_lossy();
 
         let mut res: Vec<Breadcrumb> = Vec::new();
-
         let mut link_accumulator = format!("{}/", &conf.route_prefix);
-
         let mut components = Path::new(&*decoded).components().peekable();
 
         while let Some(c) = components.next() {
@@ -217,23 +234,9 @@ pub fn directory_listing(
     };
 
     let query_params = extract_query_parameters(req);
-
-    // If the `qrcode` parameter is included in the url, then should respond to the QR code
-    if let Some(url) = query_params.qrcode {
-        let res = match QrCode::encode_text(&url, QrCodeEcc::Medium) {
-            Ok(qr) => HttpResponse::Ok()
-                .append_header(("Content-Type", "image/svg+xml"))
-                .body(qr_to_svg_string(&qr, 2)),
-            Err(err) => {
-                log::error!("URL is invalid (too long?): {:?}", err);
-                HttpResponse::UriTooLong().finish()
-            }
-        };
-        return Ok(ServiceResponse::new(req.clone(), res));
-    }
-
     let mut entries: Vec<Entry> = Vec::new();
     let mut readme: Option<(String, String)> = None;
+    let readme_rx: Regex = Regex::new("^readme([.](md|txt))?$").unwrap();
 
     for entry in dir.path.read_dir()? {
         if dir.is_visible(&entry) || conf.show_hidden {
@@ -252,7 +255,7 @@ pub fn directory_listing(
                 .and_then(|path| std::fs::read_link(path).ok())
                 .map(|path| path.to_string_lossy().into_owned());
             let file_url = base
-                .join(&utf8_percent_encode(&file_name, PATH_SEGMENT).to_string())
+                .join(utf8_percent_encode(&file_name, PATH_SEGMENT).to_string())
                 .to_string_lossy()
                 .to_string();
 
@@ -284,13 +287,18 @@ pub fn directory_listing(
                         last_modification_date,
                         symlink_dest,
                     ));
-                    if conf.readme && file_name.to_lowercase() == "readme.md" {
+                    if conf.readme && readme_rx.is_match(&file_name.to_lowercase()) {
+                        let ext = file_name.split('.').last().unwrap().to_lowercase();
                         readme = Some((
                             file_name.to_string(),
-                            markdown_to_html(
-                                &std::fs::read_to_string(entry.path())?,
-                                &ComrakOptions::default(),
-                            ),
+                            if ext == "md" {
+                                markdown_to_html(
+                                    &std::fs::read_to_string(entry.path())?,
+                                    &ComrakOptions::default(),
+                                )
+                            } else {
+                                format!("<pre>{}</pre>", &std::fs::read_to_string(entry.path())?)
+                            },
                         ));
                     }
                 }
@@ -300,7 +308,7 @@ pub fn directory_listing(
         }
     }
 
-    match query_params.sort.unwrap_or(SortingMethod::Name) {
+    match query_params.sort.unwrap_or(conf.default_sorting_method) {
         SortingMethod::Name => entries.sort_by(|e1, e2| {
             alphanumeric_sort::compare_str(e1.name.to_lowercase(), e2.name.to_lowercase())
         }),
@@ -320,7 +328,7 @@ pub fn directory_listing(
         }),
     };
 
-    if let Some(SortingOrder::Descending) = query_params.order {
+    if let SortingOrder::Asc = query_params.order.unwrap_or(conf.default_sorting_order) {
         entries.reverse()
     }
 
@@ -369,11 +377,10 @@ pub fn directory_listing(
             req.clone(),
             HttpResponse::Ok()
                 .content_type(archive_method.content_type())
-                .append_header(archive_method.content_encoding())
                 .append_header(("Content-Transfer-Encoding", "binary"))
                 .append_header((
                     "Content-Disposition",
-                    format!("attachment; filename={:?}", file_name),
+                    format!("attachment; filename={file_name:?}"),
                 ))
                 .body(actix_web::body::BodyStream::new(rx)),
         ))
@@ -384,9 +391,10 @@ pub fn directory_listing(
                 renderer::page(
                     entries,
                     readme,
+                    &abs_uri,
                     is_root,
                     query_params,
-                    breadcrumbs,
+                    &breadcrumbs,
                     &encoded_dir,
                     conf,
                     current_user,
@@ -397,44 +405,13 @@ pub fn directory_listing(
     }
 }
 
-pub fn extract_query_parameters(req: &HttpRequest) -> QueryParameters {
-    match Query::<QueryParameters>::from_query(req.query_string()) {
+pub fn extract_query_parameters(req: &HttpRequest) -> ListingQueryParameters {
+    match Query::<ListingQueryParameters>::from_query(req.query_string()) {
         Ok(Query(query_params)) => query_params,
         Err(e) => {
-            let err = ContextualError::ParseError("query parameters".to_string(), e.to_string());
+            let err = RuntimeError::ParseError("query parameters".to_string(), e.to_string());
             errors::log_error_chain(err.to_string());
-            QueryParameters::default()
+            ListingQueryParameters::default()
         }
     }
-}
-
-// Returns a string of SVG code for an image depicting
-// the given QR Code, with the given number of border modules.
-// The string always uses Unix newlines (\n), regardless of the platform.
-fn qr_to_svg_string(qr: &QrCode, border: i32) -> String {
-    assert!(border >= 0, "Border must be non-negative");
-    let mut result = String::new();
-    result += "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
-    result += "<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd\">\n";
-    let dimension = qr
-        .size()
-        .checked_add(border.checked_mul(2).unwrap())
-        .unwrap();
-    result += &format!(
-		"<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" viewBox=\"0 0 {0} {0}\" stroke=\"none\">\n", dimension);
-    result += "\t<rect width=\"100%\" height=\"100%\" fill=\"#FFFFFF\"/>\n";
-    result += "\t<path d=\"";
-    for y in 0..qr.size() {
-        for x in 0..qr.size() {
-            if qr.get_module(x, y) {
-                if x != 0 || y != 0 {
-                    result += " ";
-                }
-                result += &format!("M{},{}h1v1h-1z", x + border, y + border);
-            }
-        }
-    }
-    result += "\" fill=\"#000000\"/>\n";
-    result += "</svg>\n";
-    result
 }

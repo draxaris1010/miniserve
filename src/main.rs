@@ -1,33 +1,37 @@
-use std::io;
-use std::io::Write;
+use std::io::{self, IsTerminal, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::thread;
 use std::time::Duration;
 
 use actix_files::NamedFile;
-use actix_web::web;
-use actix_web::{http::header::ContentType, Responder};
-use actix_web::{middleware, App, HttpRequest, HttpResponse};
+use actix_web::{
+    dev::{fn_service, ServiceRequest, ServiceResponse},
+    http::header::ContentType,
+    middleware, web, App, HttpRequest, HttpResponse, Responder,
+};
 use actix_web_httpauth::middleware::HttpAuthentication;
 use anyhow::Result;
-use clap::{crate_version, IntoApp, Parser};
-use clap_complete::generate;
+use clap::{crate_version, CommandFactory, Parser};
+use colored::*;
+use fast_qr::QRBuilder;
 use log::{error, warn};
-use qrcodegen::{QrCode, QrCodeEcc};
-use yansi::{Color, Paint};
 
 mod archive;
 mod args;
 mod auth;
 mod config;
+mod consts;
 mod errors;
-mod file_upload;
+mod file_op;
+mod file_utils;
 mod listing;
 mod pipe;
 mod renderer;
 
 use crate::config::MiniserveConfig;
-use crate::errors::ContextualError;
+use crate::errors::{RuntimeError, StartupError};
+
+static STYLESHEET: &str = grass::include!("data/style.scss");
 
 fn main() -> Result<()> {
     let args = args::CliArgs::parse();
@@ -35,7 +39,7 @@ fn main() -> Result<()> {
     if let Some(shell) = args.print_completions {
         let mut clap_app = args::CliArgs::command();
         let app_name = clap_app.get_name().to_string();
-        generate(shell, &mut clap_app, app_name, &mut io::stdout());
+        clap_complete::generate(shell, &mut clap_app, app_name, &mut io::stdout());
         return Ok(());
     }
 
@@ -57,11 +61,7 @@ fn main() -> Result<()> {
 }
 
 #[actix_web::main(miniserve)]
-async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
-    if cfg!(windows) && !Paint::enable_windows_ascii() {
-        Paint::disable();
-    }
-
+async fn run(miniserve_config: MiniserveConfig) -> Result<(), StartupError> {
     let log_level = if miniserve_config.verbose {
         simplelog::LevelFilter::Info
     } else {
@@ -70,24 +70,31 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
 
     simplelog::TermLogger::init(
         log_level,
-        simplelog::Config::default(),
+        simplelog::ConfigBuilder::new()
+            .set_time_format_rfc2822()
+            .build(),
         simplelog::TerminalMode::Mixed,
-        simplelog::ColorChoice::Auto,
+        if io::stdout().is_terminal() {
+            simplelog::ColorChoice::Auto
+        } else {
+            simplelog::ColorChoice::Never
+        },
     )
     .or_else(|_| simplelog::SimpleLogger::init(log_level, simplelog::Config::default()))
     .expect("Couldn't initialize logger");
 
     if miniserve_config.no_symlinks && miniserve_config.path.is_symlink() {
-        return Err(ContextualError::NoSymlinksOptionWithSymlinkServePath(
+        return Err(StartupError::NoSymlinksOptionWithSymlinkServePath(
             miniserve_config.path.to_string_lossy().to_string(),
         ));
     }
 
     let inside_config = miniserve_config.clone();
 
-    let canon_path = miniserve_config.path.canonicalize().map_err(|e| {
-        ContextualError::IoError("Failed to resolve path to be served".to_string(), e)
-    })?;
+    let canon_path = miniserve_config
+        .path
+        .canonicalize()
+        .map_err(|e| StartupError::IoError("Failed to resolve path to be served".to_string(), e))?;
 
     // warn if --index is specified but not found
     if let Some(ref index) = miniserve_config.index {
@@ -103,7 +110,7 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
 
     println!(
         "{name} v{version}",
-        name = Paint::new("miniserve").bold(),
+        name = "miniserve".bold(),
         version = crate_version!()
     );
     if !miniserve_config.path_explicitly_chosen {
@@ -111,8 +118,8 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
         // terminal, we should refuse to start for security reasons. This would be the case when
         // running miniserve as a service but forgetting to set the path. This could be pretty
         // dangerous if given with an undesired context path (for instance /root or /).
-        if !atty::is(atty::Stream::Stdout) {
-            return Err(ContextualError::NoExplicitPathAndNoTerminal);
+        if !io::stdout().is_terminal() {
+            return Err(StartupError::NoExplicitPathAndNoTerminal);
         }
 
         warn!("miniserve has been invoked without an explicit path so it will serve the current directory after a short delay.");
@@ -122,12 +129,12 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
         print!("Starting server in ");
         io::stdout()
             .flush()
-            .map_err(|e| ContextualError::IoError("Failed to write data".to_string(), e))?;
+            .map_err(|e| StartupError::IoError("Failed to write data".to_string(), e))?;
         for c in "3… 2… 1… \n".chars() {
-            print!("{}", c);
+            print!("{c}");
             io::stdout()
                 .flush()
-                .map_err(|e| ContextualError::IoError("Failed to write data".to_string(), e))?;
+                .map_err(|e| StartupError::IoError("Failed to write data".to_string(), e))?;
             thread::sleep(Duration::from_millis(500));
         }
     }
@@ -143,7 +150,7 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
         if !wildcard.is_empty() {
             let all_ipv4 = wildcard.iter().any(|addr| addr.is_ipv4());
             let all_ipv6 = wildcard.iter().any(|addr| addr.is_ipv6());
-            ifaces = get_if_addrs::get_if_addrs()
+            ifaces = if_addrs::get_if_addrs()
                 .unwrap_or_else(|e| {
                     error!("Failed to get local interface addresses: {}", e);
                     Default::default()
@@ -162,8 +169,8 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
                 IpAddr::V6(_) => format!("[{}]:{}", addr, miniserve_config.port),
             })
             .map(|addr| match miniserve_config.tls_rustls_config {
-                Some(_) => format!("https://{}", addr),
-                None => format!("http://{}", addr),
+                Some(_) => format!("https://{addr}"),
+                None => format!("http://{addr}"),
             })
             .map(|url| format!("{}{}", url, miniserve_config.route_prefix))
             .collect::<Vec<_>>()
@@ -177,15 +184,29 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
 
     let display_sockets = socket_addresses
         .iter()
-        .map(|sock| Color::Green.paint(sock.to_string()).bold().to_string())
+        .map(|sock| sock.to_string().green().bold().to_string())
         .collect::<Vec<_>>();
+
+    let stylesheet = web::Data::new(
+        [
+            STYLESHEET,
+            inside_config.default_color_scheme.css(),
+            inside_config.default_color_scheme_dark.css_dark().as_str(),
+        ]
+        .join("\n"),
+    );
 
     let srv = actix_web::HttpServer::new(move || {
         App::new()
             .wrap(configure_header(&inside_config.clone()))
             .app_data(inside_config.clone())
+            .app_data(stylesheet.clone())
             .wrap_fn(errors::error_page_middleware)
             .wrap(middleware::Logger::default())
+            .wrap(middleware::Condition::new(
+                miniserve_config.compress_response,
+                middleware::Compress::default(),
+            ))
             .route(&inside_config.favicon_route, web::get().to(favicon))
             .route(&inside_config.css_route, web::get().to(css))
             .route(&inside_config.uppy_css_route, web::get().to(uppy_css))
@@ -204,61 +225,60 @@ async fn run(miniserve_config: MiniserveConfig) -> Result<(), ContextualError> {
     });
 
     let srv = socket_addresses.iter().try_fold(srv, |srv, addr| {
-        let listener = create_tcp_listener(*addr).map_err(|e| {
-            ContextualError::IoError(format!("Failed to bind server to {}", addr), e)
-        })?;
+        let listener = create_tcp_listener(*addr)
+            .map_err(|e| StartupError::IoError(format!("Failed to bind server to {addr}"), e))?;
 
         #[cfg(feature = "tls")]
         let srv = match &miniserve_config.tls_rustls_config {
-            Some(tls_config) => srv.listen_rustls(listener, tls_config.clone()),
+            Some(tls_config) => srv.listen_rustls_0_23(listener, tls_config.clone()),
             None => srv.listen(listener),
         };
 
         #[cfg(not(feature = "tls"))]
         let srv = srv.listen(listener);
 
-        srv.map_err(|e| ContextualError::IoError(format!("Failed to bind server to {}", addr), e))
+        srv.map_err(|e| StartupError::IoError(format!("Failed to bind server to {addr}"), e))
     })?;
 
     let srv = srv.shutdown_timeout(0).run();
 
     println!("Bound to {}", display_sockets.join(", "));
 
-    println!("Serving path {}", Color::Yellow.paint(path_string).bold());
+    println!("Serving path {}", path_string.yellow().bold());
 
     println!(
         "Available at (non-exhaustive list):\n    {}\n",
         display_urls
             .iter()
-            .map(|url| Color::Green.paint(url).bold().to_string())
+            .map(|url| url.green().bold().to_string())
             .collect::<Vec<_>>()
             .join("\n    "),
     );
 
     // print QR code to terminal
-    if miniserve_config.show_qrcode && atty::is(atty::Stream::Stdout) {
+    if miniserve_config.show_qrcode && io::stdout().is_terminal() {
         for url in display_urls
             .iter()
             .filter(|url| !url.contains("//127.0.0.1:") && !url.contains("//[::1]:"))
         {
-            match QrCode::encode_text(url, QrCodeEcc::Low) {
+            match QRBuilder::new(url.clone()).ecl(consts::QR_EC_LEVEL).build() {
                 Ok(qr) => {
-                    println!("QR code for {}:", Color::Green.paint(url).bold());
-                    print_qr(&qr);
+                    println!("QR code for {}:", url.green().bold());
+                    qr.print();
                 }
                 Err(e) => {
-                    error!("Failed to render QR to terminal: {}", e);
+                    error!("Failed to render QR to terminal: {:?}", e);
                 }
             };
         }
     }
 
-    if atty::is(atty::Stream::Stdout) {
+    if io::stdout().is_terminal() {
         println!("Quit by pressing CTRL-C");
     }
 
     srv.await
-        .map_err(|e| ContextualError::IoError("".to_owned(), e))
+        .map_err(|e| StartupError::IoError("".to_owned(), e))
 }
 
 /// Allows us to set low-level socket options
@@ -300,10 +320,35 @@ fn configure_app(app: &mut web::ServiceConfig, conf: &MiniserveConfig) {
             // Note: --spa requires --index in clap.
             if conf.spa {
                 files = files.default_handler(
-                    NamedFile::open(&conf.path.join(index_file))
-                        .expect("Cant open SPA index file."),
+                    NamedFile::open(conf.path.join(index_file))
+                        .expect("Can't open SPA index file."),
                 );
             }
+        }
+
+        // Handle --pretty-urls options.
+        //
+        // We rewrite the request to append ".html" to the path and serve the file. If the
+        // path ends with a `/`, we remove it before appending ".html".
+        //
+        // This is done to allow for pretty URLs, e.g. "/about" instead of "/about.html".
+        if conf.pretty_urls {
+            files = files.default_handler(fn_service(|req: ServiceRequest| async {
+                let (req, _) = req.into_parts();
+                let conf = req
+                    .app_data::<MiniserveConfig>()
+                    .expect("Could not get miniserve config");
+                let mut path_base = req.path()[1..].to_string();
+                if path_base.ends_with('/') {
+                    path_base.pop();
+                }
+                if !path_base.ends_with("html") {
+                    path_base = format!("{}.html", path_base);
+                }
+                let file = NamedFile::open_async(conf.path.join(path_base)).await?;
+                let res = file.into_response(&req);
+                Ok(ServiceResponse::new(req, res))
+            }));
         }
 
         if conf.show_hidden {
@@ -329,15 +374,15 @@ fn configure_app(app: &mut web::ServiceConfig, conf: &MiniserveConfig) {
     } else {
         if conf.file_upload {
             // Allow file upload
-            app.service(web::resource("/upload").route(web::post().to(file_upload::upload_file)));
+            app.service(web::resource("/upload").route(web::post().to(file_op::upload_file)));
         }
         // Handle directories
         app.service(dir_service());
     }
 }
 
-async fn error_404(req: HttpRequest) -> Result<HttpResponse, ContextualError> {
-    Err(ContextualError::RouteNotFoundError(req.path().to_string()))
+async fn error_404(req: HttpRequest) -> Result<HttpResponse, RuntimeError> {
+    Err(RuntimeError::RouteNotFoundError(req.path().to_string()))
 }
 
 async fn favicon() -> impl Responder {
@@ -347,12 +392,12 @@ async fn favicon() -> impl Responder {
         .body(logo)
 }
 
-async fn css() -> impl Responder {
-    let css = include_str!(concat!(env!("OUT_DIR"), "/style.css"));
+async fn css(stylesheet: web::Data<String>) -> impl Responder {
     HttpResponse::Ok()
         .insert_header(ContentType(mime::TEXT_CSS))
-        .body(css)
+        .body(stylesheet.to_string())
 }
+
 async fn uppy_css() -> impl Responder {
     let uppy_css = include_str!("../data/uppy.min.css");
     HttpResponse::Ok()
@@ -364,32 +409,4 @@ async fn uppy_js() -> impl Responder {
     HttpResponse::Ok()
         .insert_header(ContentType(mime::APPLICATION_JAVASCRIPT))
         .body(uppy_js)
-}
-
-// Prints to the console two inverted QrCodes side by side.
-fn print_qr(qr: &QrCode) {
-    let border = 4;
-    let size = qr.size() + 2 * border;
-
-    for y in (0..size).step_by(2) {
-        for x in 0..2 * size {
-            let inverted = x >= size;
-            let (x, y) = (x % size - border, y - border);
-
-            //each char represents two vertical modules
-            let (mod1, mod2) = match inverted {
-                false => (qr.get_module(x, y), qr.get_module(x, y + 1)),
-                true => (!qr.get_module(x, y), !qr.get_module(x, y + 1)),
-            };
-            let c = match (mod1, mod2) {
-                (false, false) => ' ',
-                (true, false) => '▀',
-                (false, true) => '▄',
-                (true, true) => '█',
-            };
-            print!("{0}", c);
-        }
-        println!();
-    }
-    println!();
 }
